@@ -1,0 +1,5 @@
+env_name: 'MineRLTreechop-v0'
+gamma: 0.99
+lr: 0.0001
+max_epi: 10000
+agent_num: 1
