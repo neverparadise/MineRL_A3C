@@ -1,5 +1,6 @@
 import minerl
 import gym
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
@@ -8,23 +9,25 @@ import torch.optim as optim
 import os
 from copy import deepcopy
 import ray
+from torch.utils.tensorboard import SummaryWriter
+
 
 @ray.remote(num_gpus=0.4)
 class ActorLearner:
-    def __init__(self, model, save_path, **args):
+    def __init__(self, model, save_path, training, **args):
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         print(f"actor_learner thread : {device}")
         # Initialize learner model and actor model
         self.learner_model = model
         self.actor_model = deepcopy(model)
         self.save_path = save_path
+        self.training = training
 
-        # Hyperparams
+        # Hyperparams and optimizer
         self.GAMMA = args['gamma']
         self.LR = args['lr']
-
         self.optimizer = optim.Adam(self.actor_model.parameters(), self.LR)
-
+        self.writer = SummaryWriter('runs/a3c/')
 
         # Env
         import minerl
@@ -40,6 +43,7 @@ class ActorLearner:
 
         # time_step counter
         self.ts_max = 10
+        self.seq_len = 1
 
     def put_transition(self, item):
         self.transitions.append(item)
@@ -65,9 +69,10 @@ class ActorLearner:
         s_prime_batch = torch.stack(s_prime_lst).float().to(device)
         done_batch = torch.tensor(done_lst).float().to(device)
 
+        batch_length = len(self.transitions)
         del self.transitions
         self.transitions = []
-        return s_batch, a_batch, r_batch, s_prime_batch, done_batch
+        return s_batch, a_batch, r_batch, s_prime_batch, done_batch, batch_length
 
     def make_19action(self, env, action_index):
             # Action들을 정의
@@ -133,30 +138,31 @@ class ActorLearner:
             return action
 
     def calcul_loss(self):
-        hiddens = torch.cat(self.hiddens, 1)
-        print(f"hidden shape in train : {hiddens.shape}")
-        s, a, r, s_prime, done = self.make_batch()
+        s, a, r, s_prime, done, batch_length = self.make_batch()
+        hiddens_prime = self.actor_model.init_hidden_state(batch_size=batch_length, training=True)
+        hiddens = self.actor_model.init_hidden_state(batch_size=batch_length, training=True)
+        # print(f"hidden shape in train : {hiddens.shape}")
 
         # Calculate TD Target
-        x_prime, new_hidden = self.actor_model.forward(s_prime, hiddens)
+        x_prime, hiddens_prime = self.actor_model.forward(s_prime, hiddens_prime)
         v_prime = self.actor_model.v(x_prime)
-        v_prime = v_prime.squeeze(0)
         td_target = r + self.GAMMA * v_prime * done
 
         # Calculate V
-        x, new_hidden = self.actor_model.v(s, hiddens)
+        x, hiddens = self.actor_model.forward(s, hiddens)
         v = self.actor_model.v(x) # torch.Size([1, 10, 1])
-        v = v.squeeze(0) # torch.Size([10, 1])
-        print(f"v shape : {v.shape}")
+        # print(f"v shape : {v.shape}")
 
         delta = td_target - v
         pi = self.actor_model.pi(x, softmax_dim=2) #  torch.Size([1, 10, 19])
-        pi = pi.squeeze(0) # torch.Size([10, 19])
-        print(f"pi shape : {pi.shape}")
-        pi_a = pi.gather(1, a)             # a : torch.Size([10, 1])
+        # print(f"pi shape : {pi.shape}")
+        a = a.unsqueeze(0)  # a : torch.Size([1, 10, 1])
+        pi_a = pi.gather(2, a)             # a : torch.Size([10, 1])
         loss = -torch.log(pi_a) * delta.detach() + F.smooth_l1_loss(v, td_target.detach())
-        #loss.mean().backward(retain_graph=True)
-        loss.mean().backward(retain_graph=True)
+        loss = loss.mean()
+        self.optimizer.zero_grad()
+        loss.backward(retain_graph=True)
+        self.optimizer.step()
 
         self.hiddens = []
         return loss.mean().item()
@@ -165,10 +171,16 @@ class ActorLearner:
         for actor_net, learner_net in zip(self.actor_model.named_parameters(), self.learner_model.named_parameters()):
             learner_net[1].grad = deepcopy(actor_net[1].grad)
 
-    def converter(self, env_name ,observation):
-        if env_name == 'MineRLNavigate-v0':
-            obs = observation
-            obs = obs / 255.0
+    def converter(self, env_name, observation):
+        if (env_name == 'MineRLNavigateDense-v0' or
+                env_name == 'MineRLNavigate-v0'):
+            obs = observation['pov']
+            obs = obs / 255.0  # [64, 64, 3]
+            compass_angle = observation['compassAngle']
+            compass_angle_scale = 180
+            compass_scaled = compass_angle / compass_angle_scale
+            compass_channel = np.ones(shape=list(obs.shape[:-1]) + [1], dtype=obs.dtype) * compass_scaled
+            obs = np.concatenate([obs, compass_channel], axis=-1)
             obs = torch.from_numpy(obs)
             obs = obs.permute(2, 0, 1)
             return obs.float()
@@ -192,14 +204,14 @@ class ActorLearner:
             state = self.env.reset()
             state = self.converter(self.env_name, state)
             # RNN must have a shape like sequence length, batch size, input size
-            hidden = self.model.init_hidden_state(batch_size=1, training=True)
+            hidden = self.actor_model.init_hidden_state(batch_size=1, training=True)
 
             while not done:
                 for t in range(self.ts_max):
                     x, hidden = self.actor_model.forward(state, hidden)
                     # because of rnn input, softmax_dim needs to be 2
                     prob = self.actor_model.pi(x, softmax_dim=2) # torch.Size([1, 1, 19])
-                    print(f"prob shape : {prob.shape}")
+                    # print(f"prob shape : {prob.shape}")
                     m = Categorical(prob)
                     action_index = m.sample().item()
                     action = self.make_19action(self.env, action_index)
@@ -210,16 +222,19 @@ class ActorLearner:
                     state = s_prime
                     self.score += reward
                     T += 1
-
                     if done:
                         break
-                self.optimizer.zero_grad()
+
                 loss = self.calcul_loss()
-                self.optimizer.step()
+                self.writer.add_scalar('Loss/train', loss)
                 self.accumulate_gradients()
+                if done:
+                    break
+            self.writer.add_scalar('Rewards/train', self.score, n_epi)
+            print(f"Episode {n_epi} : {self.score}")
+            n_epi += 1
 
             # Write down loss, rewards
-
             self.save_model()
             self.score = 0.0
 

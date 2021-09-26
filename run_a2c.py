@@ -5,6 +5,7 @@ import torch
 import torch.optim as optim
 from torch.distributions import Categorical
 from torch.autograd import Variable
+from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
 import numpy as np
 import ray
@@ -23,12 +24,12 @@ with open(parse.yaml) as f:
     args = yaml.load(f, Loader=yaml.FullLoader)
 
 class ActorCrictic:
-    def __init__(self, model, save_path, tested, **args):
+    def __init__(self, model, save_path, training, writer, **args):
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         # Initialize learner model and actor model
         self.model = model
         self.save_path = save_path
-        self.tested = tested
+        self.training = training
 
         # Hyperparams
         self.GAMMA = args['gamma']
@@ -36,6 +37,7 @@ class ActorCrictic:
 
         # Optimizer
         self.optimizer = optim.Adam(self.model.parameters(), self.LR)
+        self.writer = writer
 
         # Env
         self.env_name = args['env_name']
@@ -76,10 +78,10 @@ class ActorCrictic:
         s_prime_batch = torch.stack(s_prime_lst).float().to(device)
         done_batch = torch.tensor(done_lst).float().to(device)
 
-
+        batch_length = len(self.transitions)
         del self.transitions
         self.transitions = []
-        return s_batch, a_batch, r_batch, s_prime_batch, done_batch
+        return s_batch, a_batch, r_batch, s_prime_batch, done_batch, batch_length
 
     def make_19action(self, env, action_index):
             # Action들을 정의
@@ -146,9 +148,9 @@ class ActorCrictic:
 
     def calcul_loss(self):
         with torch.autograd.set_detect_anomaly(True):
-            hiddens_prime = self.model.init_hidden_state(batch_size=self.ts_max, training=True)
-            hiddens = self.model.init_hidden_state(batch_size=self.ts_max, training=True)
-            s, a, r, s_prime, done = self.make_batch()
+            s, a, r, s_prime, done, batch_length = self.make_batch()
+            hiddens_prime = self.model.init_hidden_state(batch_size=batch_length, training=True)
+            hiddens = self.model.init_hidden_state(batch_size=batch_length, training=True)
 
             # Calculate TD Target
             x_prime, hiddens_prime = self.model.forward(s_prime, hiddens_prime)
@@ -228,9 +230,13 @@ class ActorCrictic:
                     if done:
                         break
                 loss = self.calcul_loss()
+                self.writer.add_scalar('Loss/train', loss, n_epi)
+                self.writer.add_scalar('Rewards/train', self.score, n_epi)
+
                 print(self.score)
                 if done:
                     break
+            n_epi += 1
 
             # Write down loss, rewards
 
@@ -243,9 +249,10 @@ class ActorCrictic:
 
 
 def main():
+    writer = SummaryWriter()
     model = A3C_GRU(channels=4, num_actions=19).cuda()
     save_path = os.curdir + '/trained_models/'
-    agent = ActorCrictic(model,save_path,False, **args)
+    agent = ActorCrictic(model,save_path,False, writer, **args)
     agent.train()
 
 main()
