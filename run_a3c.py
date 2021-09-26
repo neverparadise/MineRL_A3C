@@ -6,7 +6,7 @@ import torch.optim as optim
 import ray
 import yaml
 import os
-from A3C import A3C_LSTM
+from A3C_GRU import A3C_GRU
 from ActorLearner import ActorLearner
 
 with open('treechop.yaml') as f:
@@ -25,9 +25,7 @@ def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"main thread : {device}")
 
-    # Optimizer
-
-    model = A3C_LSTM(19).cuda()
+    model = A3C_GRU(19).cuda()
     learner_model = ray.get(ray.put(model))
 
     actor_learners = [ActorLearner.remote(learner_model, save_path, **args)
