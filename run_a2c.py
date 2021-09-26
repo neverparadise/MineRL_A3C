@@ -6,14 +6,20 @@ import torch.optim as optim
 from torch.distributions import Categorical
 from torch.autograd import Variable
 import torch.nn.functional as F
-
+import numpy as np
 import ray
 import yaml
 import os
 from A3C_GRU import A3C_GRU
 from copy import deepcopy
+import argparse
 
-with open('treechop.yaml') as f:
+parser = argparse.ArgumentParser(description='Argparse Tutorial')
+parser.add_argument('--yaml', type=str, default="treechop", help='name of yaml file')
+parse = parser.parse_args()
+parse.yaml = 'navigate.yaml'
+
+with open(parse.yaml) as f:
     args = yaml.load(f, Loader=yaml.FullLoader)
 
 class ActorCrictic:
@@ -44,7 +50,6 @@ class ActorCrictic:
 
         # time_step counter
         self.ts_max = 10
-        self.batch_size = self.ts_max
         self.seq_len = 1
 
     def put_transition(self, item):
@@ -141,40 +146,46 @@ class ActorCrictic:
 
     def calcul_loss(self):
         with torch.autograd.set_detect_anomaly(True):
-            hiddens = torch.cat(self.hiddens, 1)
-            print(f"hidden shape in train : {hiddens.shape}")
-            # hiddens must be tuple
-            hiddens = tuple(each.data for each in hiddens)
+            hiddens_prime = self.model.init_hidden_state(batch_size=self.ts_max, training=True)
+            hiddens = self.model.init_hidden_state(batch_size=self.ts_max, training=True)
             s, a, r, s_prime, done = self.make_batch()
 
             # Calculate TD Target
-            x_prime, new_hidden_prime = self.model.forward(s_prime, hiddens)
+            x_prime, hiddens_prime = self.model.forward(s_prime, hiddens_prime)
             v_prime = self.model.v(x_prime)
             td_target = r + self.GAMMA * v_prime * done
-            print(f"td target shape : {td_target.shape}")
+            #print(f"td target shape : {td_target.shape}")
 
             # Calculate V
-            x, new_hidden = self.model.forward(s, hiddens)
+            x, hiddens = self.model.forward(s, hiddens)
             v = self.model.v(x) # torch.Size([1, 10, 1])
-            print(f"v shape : {v.shape}")
+            #print(f"v shape : {v.shape}")
 
             delta = td_target - v
-            print(f"delta shape : {delta.shape}")
+            #print(f"delta shape : {delta.shape}")
             pi = self.model.pi(x, softmax_dim=2) #  torch.Size([1, 10, 19])
-            print(f"pi shape : {pi.shape}")
+            #print(f"pi shape : {pi.shape}")
             a = a.unsqueeze(0)  # a : torch.Size([1, 10, 1])
             pi_a = pi.gather(2, a)
             loss = -torch.log(pi_a) * delta.detach() + F.smooth_l1_loss(v, td_target.detach())
             loss = loss.mean()
+            self.optimizer.zero_grad()
             loss.backward(retain_graph=True)
+            self.optimizer.step()
 
             self.hiddens = []
             return loss.mean().item()
 
     def converter(self, env_name ,observation):
-        if env_name == 'MineRLNavigate-v0':
-            obs = observation
-            obs = obs / 255.0
+        if (env_name == 'MineRLNavigateDense-v0' or
+            env_name == 'MineRLNavigate-v0'):
+            obs = observation['pov']
+            obs = obs / 255.0 # [64, 64, 3]
+            compass_angle = observation['compassAngle']
+            compass_angle_scale = 180
+            compass_scaled = compass_angle / compass_angle_scale
+            compass_channel = np.ones(shape=list(obs.shape[:-1]) + [1], dtype=obs.dtype) * compass_scaled
+            obs = np.concatenate([obs, compass_channel], axis=-1)
             obs = torch.from_numpy(obs)
             obs = obs.permute(2, 0, 1)
             return obs.float()
@@ -211,27 +222,28 @@ class ActorCrictic:
                     s_prime, reward, done, _ = self.env.step(action)
                     s_prime = self.converter(self.env_name, s_prime)
                     self.put_transition((state, action_index, reward, s_prime, done ))
-                    self.put_hidden(hidden)
                     state = s_prime
                     self.score += reward
 
                     if done:
                         break
-                #self.optimizer.zero_grad()
-                #loss = self.calcul_loss()
-                #self.optimizer.step()
+                loss = self.calcul_loss()
+                print(self.score)
+                if done:
+                    break
 
             # Write down loss, rewards
 
             self.save_model()
             self.score = 0.0
+            print(self.score)
 
         self.env.close()
 
 
 
 def main():
-    model = A3C_GRU(19).cuda()
+    model = A3C_GRU(channels=4, num_actions=19).cuda()
     save_path = os.curdir + '/trained_models/'
     agent = ActorCrictic(model,save_path,False, **args)
     agent.train()
