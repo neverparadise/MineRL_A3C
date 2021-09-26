@@ -34,13 +34,18 @@ class ActorLearner:
         self.agent_num = args['agent_num']
         self.score = 0
 
+        # datas for learning
         self.transitions = []
+        self.hiddens = []
 
         # time_step counter
         self.ts_max = 10
 
     def put_transition(self, item):
         self.transitions.append(item)
+
+    def put_hidden(self, item):
+        self.hiddens.append(item)
 
     def make_batch(self):
         device = 'cuda'
@@ -55,7 +60,7 @@ class ActorLearner:
             done_lst.append([done_mask])
         s_batch = torch.stack(s_lst).float().to(device)
         a_batch = torch.tensor(a_lst).to(device)
-        print(a_batch.shape)
+        # print(a_batch.shape) torch.Size([10, 1])
         r_batch = torch.tensor(r_lst).float().to(device)
         s_prime_batch = torch.stack(s_prime_lst).float().to(device)
         done_batch = torch.tensor(done_lst).float().to(device)
@@ -127,24 +132,32 @@ class ActorLearner:
 
             return action
 
-    def calcul_loss(self, hidden):
+    def calcul_loss(self):
+        hiddens = torch.cat(self.hiddens, 1)
+        print(f"hidden shape in train : {hiddens.shape}")
         s, a, r, s_prime, done = self.make_batch()
 
         # Calculate TD Target
-        x_prime, new_hidden = self.actor_model.forward(s_prime, hidden)
+        x_prime, new_hidden = self.actor_model.forward(s_prime, hiddens)
         v_prime = self.actor_model.v(x_prime)
         td_target = r + self.GAMMA * v_prime * done
 
         # Calculate V
-        x, new_hidden = self.actor_model(s, hidden)
-        v = self.actor_model.v(x)
+        x, new_hidden = self.actor_model(s, hiddens)
+        v = self.actor_model.v(x) # torch.Size([1, 10, 1])
+        v = v.squeeze(0) # torch.Size([10, 1])
+        print(f"v shape : {v.shape}")
 
         delta = td_target - v
-        pi = self.actor_model.pi(x, softmax_dim=2) #  torch.Size([10, 19])
+        pi = self.actor_model.pi(x, softmax_dim=2) #  torch.Size([1, 10, 19])
+        pi = pi.squeeze(0) # torch.Size([10, 19])
+        print(f"pi shape : {pi.shape}")
         pi_a = pi.gather(1, a)             # a : torch.Size([10, 1])
-        loss = -torch.log(pi_a) * delta + F.smooth_l1_loss(v, td_target.detach())
+        loss = -torch.log(pi_a) * delta.detach() + F.smooth_l1_loss(v, td_target.detach())
         #loss.mean().backward(retain_graph=True)
         loss.mean().backward(retain_graph=True)
+
+        self.hiddens = []
         return loss.mean().item()
 
     def accumulate_gradients(self):
@@ -177,20 +190,22 @@ class ActorLearner:
             done = False
             state = self.env.reset()
             state = self.converter(self.env_name, state)
-            hidden = (Variable(torch.zeros(1, 1, 64).float()).to(device=device),
-                      Variable(torch.zeros(1, 1, 64).float()).to(device=device))
+            # RNN must have a shape like sequence length, batch size, input size
+            hidden = Variable(torch.zeros(1, 1, 64).float()).to(device=device)
 
             while not done:
                 for t in range(self.ts_max):
                     x, hidden = self.actor_model.forward(state, hidden)
-                    prob = self.actor_model.pi(x, softmax_dim=2)
+                    # because of rnn input, softmax_dim needs to be 2
+                    prob = self.actor_model.pi(x, softmax_dim=2) # torch.Size([1, 1, 19])
+                    print(f"prob shape : {prob.shape}")
                     m = Categorical(prob)
                     action_index = m.sample().item()
                     action = self.make_19action(self.env, action_index)
                     s_prime, reward, done, _ = self.env.step(action)
                     s_prime = self.converter(self.env_name, s_prime)
                     self.put_transition((state, action_index, reward, s_prime, done ))
-
+                    self.put_hidden(hidden)
                     state = s_prime
                     self.score += reward
                     T += 1
@@ -198,7 +213,7 @@ class ActorLearner:
                     if done:
                         break
                 self.optimizer.zero_grad()
-                loss = self.calcul_loss(hidden)
+                loss = self.calcul_loss()
                 self.optimizer.step()
                 self.accumulate_gradients()
 
