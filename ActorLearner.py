@@ -51,7 +51,7 @@ class ActorLearner:
     def put_hidden(self, item):
         self.hiddens.append(item)
 
-    def make_batch(self):
+    def make_sequence(self):
         device = 'cuda'
         s_lst, a_lst, r_lst, s_prime_lst, done_lst = [], [], [], [], []
         for i, transition in enumerate(self.transitions):
@@ -69,10 +69,10 @@ class ActorLearner:
         s_prime_batch = torch.stack(s_prime_lst).float().to(device)
         done_batch = torch.tensor(done_lst).float().to(device)
 
-        batch_length = len(self.transitions)
+        seq_length = len(self.transitions)
         del self.transitions
         self.transitions = []
-        return s_batch, a_batch, r_batch, s_prime_batch, done_batch, batch_length
+        return s_batch, a_batch, r_batch, s_prime_batch, done_batch, seq_length
 
     def make_19action(self, env, action_index):
             # Action들을 정의
@@ -138,13 +138,14 @@ class ActorLearner:
             return action
 
     def calcul_loss(self):
-        s, a, r, s_prime, done, batch_length = self.make_batch()
-        hiddens_prime = self.actor_model.init_hidden_state(batch_size=batch_length, training=True)
-        hiddens = self.actor_model.init_hidden_state(batch_size=batch_length, training=True)
+        s, a, r, s_prime, done, seq_length = self.make_sequence()
+        hiddens_prime = self.actor_model.init_hidden_state(training=True)
+        hiddens = self.actor_model.init_hidden_state(training=True)
         # print(f"hidden shape in train : {hiddens.shape}")
 
         # Calculate TD Target
-        x_prime, hiddens_prime = self.actor_model.forward(s_prime, hiddens_prime)
+        for i in range(seq_length):
+            x_prime, hiddens_prime = self.actor_model.forward(s_prime, hiddens_prime)
         v_prime = self.actor_model.v(x_prime)
         td_target = r + self.GAMMA * v_prime * done
 
@@ -204,7 +205,7 @@ class ActorLearner:
             state = self.env.reset()
             state = self.converter(self.env_name, state)
             # RNN must have a shape like sequence length, batch size, input size
-            hidden = self.actor_model.init_hidden_state(batch_size=1, training=True)
+            hidden = self.actor_model.init_hidden_state(training=True)
 
             while not done:
                 for t in range(self.ts_max):
