@@ -5,11 +5,11 @@ import torch.nn.functional as F
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class A3C_GRU(nn.Module):
-    def __init__(self, num_actions):
+    def __init__(self, num_actions, channels=3):
         super(A3C_GRU, self).__init__()
         self.num_actions = num_actions
 
-        self.conv1 = nn.Conv2d(3, 8, kernel_size=8, stride=4)
+        self.conv1 = nn.Conv2d(channels, 8, kernel_size=8, stride=4)
         self.bn1 = nn.BatchNorm2d(8)
         self.conv2 = nn.Conv2d(8, 16, kernel_size=4, stride=2)
         self.bn2 = nn.BatchNorm2d(16)
