@@ -55,3 +55,12 @@ class A3C_GRU(nn.Module):
         x, new_hidden = self.gru(x, hidden)
         #print(f"After GRU : {x.shape}") batch : (1, 10, 64)
         return x, new_hidden
+
+    def init_hidden_state(self, batch_size, training=None):
+
+        assert training is not None, "training step parameter should be dtermined"
+
+        if training is True:
+            return torch.zeros([1, batch_size, self.gru_h_dim], device=device)
+        else:
+            return torch.zeros([1, 1, self.gru_h_dim], device=device)

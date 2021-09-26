@@ -6,7 +6,7 @@ import torch.optim as optim
 import ray
 import yaml
 import os
-from A3C import A3C_GRU
+from A3C_GRU import A3C_GRU
 from ActorLearner import ActorLearner
 
 with open('treechop.yaml') as f:

@@ -140,10 +140,11 @@ class ActorLearner:
         # Calculate TD Target
         x_prime, new_hidden = self.actor_model.forward(s_prime, hiddens)
         v_prime = self.actor_model.v(x_prime)
+        v_prime = v_prime.squeeze(0)
         td_target = r + self.GAMMA * v_prime * done
 
         # Calculate V
-        x, new_hidden = self.actor_model(s, hiddens)
+        x, new_hidden = self.actor_model.v(s, hiddens)
         v = self.actor_model.v(x) # torch.Size([1, 10, 1])
         v = v.squeeze(0) # torch.Size([10, 1])
         print(f"v shape : {v.shape}")
@@ -191,7 +192,7 @@ class ActorLearner:
             state = self.env.reset()
             state = self.converter(self.env_name, state)
             # RNN must have a shape like sequence length, batch size, input size
-            hidden = Variable(torch.zeros(1, 1, 64).float()).to(device=device)
+            hidden = self.model.init_hidden_state(batch_size=1, training=True)
 
             while not done:
                 for t in range(self.ts_max):
