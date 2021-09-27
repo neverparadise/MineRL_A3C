@@ -45,22 +45,34 @@ class ActorLearner:
 
         # datas for learning
         self.transitions = deque(maxlen=self.ts_max)
-
+        self.hiddens = []
+        self.next_hiddens = []
+        self.values = []
+        self.next_values = []
 
     def put_transition(self, item):
         self.transitions.append(item)
 
+    def put_hidden(self, item):
+        self.hiddens.append(item)
+
+    def put_next_hidden(self, item):
+        self.next_hiddens.append(item)
+
     def make_sequence(self):
         device = 'cuda'
         s_lst, a_lst, r_lst, s_prime_lst, done_lst = [], [], [], [], []
+        v_lst, v_prime_lst = [], []
         for i, transition in enumerate(self.transitions):
-            s, a, r, s_prime, done = transition
+            s, a, r, s_prime, done, v, v_prime = transition
             s_lst.append(s)
             a_lst.append(torch.tensor([[a]], device=device))
             r_lst.append([r])
             s_prime_lst.append(s_prime)
             done_mask = 0.0 if done else 1.0
             done_lst.append([done_mask])
+            v_lst.append(v)
+            v_prime_lst.append(v)
 
         #s_batch = torch.cat(s_lst, axis=1).float().to(device)
         s_batch = s_lst
@@ -70,11 +82,13 @@ class ActorLearner:
         #s_prime_batch = torch.cat(s_prime_lst, axis=1).float().to(device)
         s_prime_batch = s_prime_lst
         done_batch = torch.tensor(done_lst).float().to(device)
-
+        v_batch = v_lst
+        v_prime_batch = v_prime_lst
         seq_length = len(self.transitions)
         del self.transitions
         self.transitions = []
-        return s_batch, a_batch, r_batch, s_prime_batch, done_batch, seq_length
+
+        return s_batch, a_batch, r_batch, s_prime_batch, done_batch, v_batch, v_prime_batch, seq_length
 
     def make_19action(self, env, action_index):
             # Action들을 정의
@@ -140,32 +154,33 @@ class ActorLearner:
             return action
 
     def calcul_loss(self):
-        x, a, r, x_prime, done, seq_length = self.make_sequence()
-        total_loss = torch.zeros(1, device=device)
-        for i in range(self.ts_max):
-            # Calculate TD Target
-            print(f"x shape : {x[i].shape}")
+        state, a, r, s_prime, done, v_batch, v_prime_batch, seq_length = self.make_sequence()
+        with torch.autograd.set_detect_anomaly(True):
+            total_loss = torch.zeros(1, device=device)
+            for i in range(self.ts_max):
+                # Calculate TD Target
+                print(f"state shape : {state[i].shape}")
 
-            v_prime = self.actor_model.v(x_prime[i])
-            td_target = r[i] + self.GAMMA * v_prime * done[i]
+                v_prime = self.actor_model.v(s_prime[i])
+                td_target = r[i] + self.GAMMA * v_prime * done[i]
 
-            # Calculate V
-            v = self.actor_model.v(x[i])  # torch.Size([1, 1, 1])
-            delta = td_target - v
-            pi = self.actor_model.pi(x[i], softmax_dim=2) #  torch.Size([1, 1, 19])
-            print(f"pi shape : {pi.shape}")
-             # a : list contain 10 items : torch.Size([1, ,1])
-            action = a[i]  # action : torch.Size([1, 1])
-            print(f"action shape : {action.shape}")
-            pi = pi.squeeze(0)
-            print(f"pi shape : {pi.shape}")
-            pi_a = pi.gather(1, action)
-            loss = -torch.log(pi_a) * delta.detach() + F.smooth_l1_loss(v, td_target.detach())
-            loss = loss.mean()
-            total_loss += loss
-        self.optimizer.zero_grad()
-        total_loss.backward(retain_graph=True)
-        self.optimizer.step()
+                # Calculate V
+                v = self.actor_model.v(state[i])  # torch.Size([1, 1, 1])
+                delta = td_target - v
+                pi = self.actor_model.pi(x[i], softmax_dim=2) #  torch.Size([1, 1, 19])
+                print(f"pi shape : {pi.shape}")
+                 # a : list contain 10 items : torch.Size([1, ,1])
+                action = a[i]  # action : torch.Size([1, 1])
+                print(f"action shape : {action.shape}")
+                pi = pi.squeeze(0)
+                print(f"pi shape : {pi.shape}")
+                pi_a = pi.gather(1, action)
+                loss = -torch.log(pi_a) * delta.detach() + F.smooth_l1_loss(v, td_target.detach())
+                loss = loss.mean()
+                total_loss += loss
+            self.optimizer.zero_grad()
+            total_loss.backward(retain_graph=True)
+            self.optimizer.step()
 
         return total_loss.item()
 
@@ -185,13 +200,13 @@ class ActorLearner:
             obs = np.concatenate([obs, compass_channel], axis=-1)
             obs = torch.from_numpy(obs)
             obs = obs.permute(2, 0, 1)
-            return obs.float()
+            return obs.float().cuda()
         else:
             obs = observation['pov']
             obs = obs / 255.0
             obs = torch.from_numpy(obs)
             obs = obs.permute(2, 0, 1)
-            return obs.float()
+            return obs.float().cuda()
 
     def save_model(self):
         torch.save({'model_state_dict': self.learner_model.state_dict()}, self.save_path + 'A3C_MineRL.pth')
@@ -210,17 +225,20 @@ class ActorLearner:
 
             while not done:
                 for t in range(self.ts_max):
-                    x, hidden = self.actor_model.forward(state, hidden)
+                    prob, v, hidden = self.actor_model.forward(state, hidden, softmax_dim=2) # prob : torch.Size([1, 1, 19]), v: ([1, 1, 1])
                     # because of rnn input, softmax_dim needs to be 2
-                    prob = self.actor_model.pi(x, softmax_dim=2) # torch.Size([1, 1, 19])
                     # print(f"prob shape : {prob.shape}")
+
+                    # Select action
                     m = Categorical(prob)
                     action_index = m.sample().item()
                     action = self.make_19action(self.env, action_index)
+
+                    # Step environment
                     s_prime, reward, done, _ = self.env.step(action)
                     s_prime = self.converter(self.env_name, s_prime)
-                    x_prime, hidden = self.actor_model.forward(s_prime, hidden)
-                    self.put_transition((x, action_index, reward, x_prime, done))
+                    prob, v_prime, hidden = self.actor_model.forward(s_prime, hiddenn, softmax_dim=2)
+                    self.put_transition((state, action_index, reward, s_prime, done, v, v_prime))
                     state = s_prime
                     self.score += reward
                     T += 1

@@ -15,6 +15,9 @@ from A3C_GRU import A3C_GRU
 from copy import deepcopy
 import argparse
 
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
 parser = argparse.ArgumentParser(description='Argparse Tutorial')
 parser.add_argument('--yaml', type=str, default="treechop", help='name of yaml file')
 parse = parser.parse_args()
@@ -145,8 +148,63 @@ class ActorCrictic:
                 action['attack'] = 1
 
             return action
+    def make_sequence(self):
+        s_lst, a_lst, r_lst, s_prime_lst, done_lst = [], [], [], [], []
+        for i, transition in enumerate(self.transitions):
+            s, a, r, s_prime, done = transition
+            s_lst.append(s)
+            a_lst.append(torch.tensor([[a]], device=device))
+            r_lst.append([r])
+            s_prime_lst.append(s_prime)
+            done_mask = 0.0 if done else 1.0
+            done_lst.append([done_mask])
+
+        #s_batch = torch.cat(s_lst, axis=1).float().to(device)
+        s_batch = s_lst
+        #a_batch = torch.tensor(a_lst, axis=1).to(device) # torch.Size([10, 1, 1])
+        a_batch = a_lst
+        r_batch = torch.tensor(r_lst).float().to(device)
+        #s_prime_batch = torch.cat(s_prime_lst, axis=1).float().to(device)
+        s_prime_batch = s_prime_lst
+        done_batch = torch.tensor(done_lst).float().to(device)
+
+        seq_length = len(self.transitions)
+        del self.transitions
+        self.transitions = []
+        return s_batch, a_batch, r_batch, s_prime_batch, done_batch, seq_length
 
     def calcul_loss(self):
+        x, a, r, x_prime, done, seq_length = self.make_sequence()
+        with torch.autograd.set_detect_anomaly(True):
+            total_loss = torch.zeros(1, device=device)
+            for i in range(self.ts_max):
+                # Calculate TD Target
+                print(f"x shape : {x[i].shape}")
+
+                v_prime = self.model.v(x_prime[i])
+                td_target = r[i] + self.GAMMA * v_prime * done[i]
+
+                # Calculate V
+                v = self.model.v(x[i])  # torch.Size([1, 1, 1])
+                delta = td_target - v
+                pi = self.model.pi(x[i], softmax_dim=2) #  torch.Size([1, 1, 19])
+                print(f"pi shape : {pi.shape}")
+                 # a : list contain 10 items : torch.Size([1, ,1])
+                action = a[i]  # action : torch.Size([1, 1])
+                print(f"action shape : {action.shape}")
+                pi = pi.squeeze(0)
+                print(f"pi shape : {pi.shape}")
+                pi_a = pi.gather(1, action)
+                loss = -torch.log(pi_a) * delta.detach() + F.smooth_l1_loss(v, td_target.detach())
+                loss = loss.mean()
+                total_loss += loss
+            self.optimizer.zero_grad()
+            total_loss.backward(retain_graph=True)
+            self.optimizer.step()
+
+        return total_loss.item()
+
+    def calcul_loss_origin(self):
         with torch.autograd.set_detect_anomaly(True):
             s, a, r, s_prime, done, batch_length = self.make_batch()
             hiddens_prime = self.model.init_hidden_state(batch_size=batch_length, training=True)
@@ -190,13 +248,13 @@ class ActorCrictic:
             obs = np.concatenate([obs, compass_channel], axis=-1)
             obs = torch.from_numpy(obs)
             obs = obs.permute(2, 0, 1)
-            return obs.float()
+            return obs.float().cuda()
         else:
             obs = observation['pov']
             obs = obs / 255.0
             obs = torch.from_numpy(obs)
             obs = obs.permute(2, 0, 1)
-            return obs.float()
+            return obs.float().cuda()
 
     def save_model(self):
         torch.save({'model_state_dict': self.model.state_dict()}, self.save_path + 'A3C_MineRL.pth')
@@ -223,7 +281,8 @@ class ActorCrictic:
                     action = self.make_19action(self.env, action_index)
                     s_prime, reward, done, _ = self.env.step(action)
                     s_prime = self.converter(self.env_name, s_prime)
-                    self.put_transition((state, action_index, reward, s_prime, done ))
+                    x_prime, hidden = self.model.forward(s_prime, hidden)
+                    self.put_transition((x, action_index, reward, x_prime, done ))
                     state = s_prime
                     self.score += reward
 

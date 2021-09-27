@@ -43,7 +43,7 @@ class A3C_GRU(nn.Module):
         v = self.fc_v(x)
         return v
 
-    def forward(self, x, hidden):
+    def forward(self, x, hidden, softmax_dim):
         # x : (4, 64, 64)
         self.gru.flatten_parameters()
         if(len(x.shape) < 4): # (batch, seq_len, input)
@@ -58,8 +58,13 @@ class A3C_GRU(nn.Module):
         # print(f"After Conv2GRU : {x.shape}") # torch.Size([1, 64])
         x = x.unsqueeze(0)  #
         x, new_hidden = self.gru(x, hidden)
+        pi = self.fc_pi(x)
+        v = self.fc_v(x)
+        prob = F.softmax(pi, dim=softmax_dim)
+
+
         # print(f"After GRU : {x.shape}") # torch.Size([1, 1, 64])
-        return x, new_hidden
+        return pi, v, new_hidden
 
     def init_hidden_state(self, batch_size=1, seq_len=1, training=None):
 
