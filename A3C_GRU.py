@@ -12,7 +12,7 @@ class A3C_GRU(nn.Module):
         self.conv1 = nn.Conv2d(channels, 32, kernel_size=8, stride=4)
         self.bn1 = nn.BatchNorm2d(32)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
-        self.bn2 = nn.BatchNorm2d(16)
+        self.bn2 = nn.BatchNorm2d(64)
         self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
         self.bn3 = nn.BatchNorm2d(64)
 
@@ -34,7 +34,9 @@ class A3C_GRU(nn.Module):
 
     def pi(self, x, softmax_dim=1):
         x = self.fc_pi(x)
+        # print(f"after pi : {x.shape}") # torch.Size([1, 1, 19])
         prob = F.softmax(x, dim=softmax_dim)
+        #print(f"prob : {prob.shape}") # prob : torch.Size([1, 1, 19])
         return prob
 
     def v(self, x):
@@ -42,18 +44,21 @@ class A3C_GRU(nn.Module):
         return v
 
     def forward(self, x, hidden):
-        if(len(x.shape) < 4):
+        # x : (4, 64, 64)
+        self.gru.flatten_parameters()
+        if(len(x.shape) < 4): # (batch, seq_len, input)
             x = x.unsqueeze(0).to(device=device)
+            # x : (1, 4, 64, 64)
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
         x = x.contiguous()
         x = x.view(x.size(0), -1)
         x = F.relu(self.Conv2GRU(x))
-        #print(f"After Conv2GRU : {x.shape}")
+        # print(f"After Conv2GRU : {x.shape}") # torch.Size([1, 64])
         x = x.unsqueeze(0)  #
         x, new_hidden = self.gru(x, hidden)
-        #print(f"After GRU : {x.shape}") batch : (1, 10, 64)
+        # print(f"After GRU : {x.shape}") # torch.Size([1, 1, 64])
         return x, new_hidden
 
     def init_hidden_state(self, batch_size=1, seq_len=1, training=None):

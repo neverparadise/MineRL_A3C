@@ -1,7 +1,7 @@
 env_name: 'MineRLNavigateDense-v0'
 gamma: 0.99
 lr: 0.0001
-max_epi: 10000
+max_epi: 1000
 agent_num: 2
 num_gpus: 0.4
 num_channels: 4

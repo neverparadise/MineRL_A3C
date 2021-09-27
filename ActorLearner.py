@@ -10,12 +10,13 @@ import os
 from copy import deepcopy
 import ray
 from torch.utils.tensorboard import SummaryWriter
+from collections import deque
 
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 @ray.remote(num_gpus=0.4)
 class ActorLearner:
     def __init__(self, model, save_path, training, **args):
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         print(f"actor_learner thread : {device}")
         # Initialize learner model and actor model
         self.learner_model = model
@@ -37,19 +38,17 @@ class ActorLearner:
         self.agent_num = args['agent_num']
         self.score = 0
 
-        # datas for learning
-        self.transitions = []
-        self.hiddens = []
 
         # time_step counter
         self.ts_max = 10
         self.seq_len = 1
 
+        # datas for learning
+        self.transitions = deque(maxlen=self.ts_max)
+
+
     def put_transition(self, item):
         self.transitions.append(item)
-
-    def put_hidden(self, item):
-        self.hiddens.append(item)
 
     def make_sequence(self):
         device = 'cuda'
@@ -57,16 +56,19 @@ class ActorLearner:
         for i, transition in enumerate(self.transitions):
             s, a, r, s_prime, done = transition
             s_lst.append(s)
-            a_lst.append([a])
-            r_lst.append(([r]))
+            a_lst.append(torch.tensor([[a]], device=device))
+            r_lst.append([r])
             s_prime_lst.append(s_prime)
             done_mask = 0.0 if done else 1.0
             done_lst.append([done_mask])
-        s_batch = torch.stack(s_lst).float().to(device)
-        a_batch = torch.tensor(a_lst).to(device)
-        # print(a_batch.shape) torch.Size([10, 1])
+
+        #s_batch = torch.cat(s_lst, axis=1).float().to(device)
+        s_batch = s_lst
+        #a_batch = torch.tensor(a_lst, axis=1).to(device) # torch.Size([10, 1, 1])
+        a_batch = a_lst
         r_batch = torch.tensor(r_lst).float().to(device)
-        s_prime_batch = torch.stack(s_prime_lst).float().to(device)
+        #s_prime_batch = torch.cat(s_prime_lst, axis=1).float().to(device)
+        s_prime_batch = s_prime_lst
         done_batch = torch.tensor(done_lst).float().to(device)
 
         seq_length = len(self.transitions)
@@ -138,35 +140,34 @@ class ActorLearner:
             return action
 
     def calcul_loss(self):
-        s, a, r, s_prime, done, seq_length = self.make_sequence()
-        hiddens_prime = self.actor_model.init_hidden_state(training=True)
-        hiddens = self.actor_model.init_hidden_state(training=True)
-        # print(f"hidden shape in train : {hiddens.shape}")
+        x, a, r, x_prime, done, seq_length = self.make_sequence()
+        total_loss = torch.zeros(1, device=device)
+        for i in range(self.ts_max):
+            # Calculate TD Target
+            print(f"x shape : {x[i].shape}")
 
-        # Calculate TD Target
-        for i in range(seq_length):
-            x_prime, hiddens_prime = self.actor_model.forward(s_prime, hiddens_prime)
-        v_prime = self.actor_model.v(x_prime)
-        td_target = r + self.GAMMA * v_prime * done
+            v_prime = self.actor_model.v(x_prime[i])
+            td_target = r[i] + self.GAMMA * v_prime * done[i]
 
-        # Calculate V
-        x, hiddens = self.actor_model.forward(s, hiddens)
-        v = self.actor_model.v(x) # torch.Size([1, 10, 1])
-        # print(f"v shape : {v.shape}")
-
-        delta = td_target - v
-        pi = self.actor_model.pi(x, softmax_dim=2) #  torch.Size([1, 10, 19])
-        # print(f"pi shape : {pi.shape}")
-        a = a.unsqueeze(0)  # a : torch.Size([1, 10, 1])
-        pi_a = pi.gather(2, a)             # a : torch.Size([10, 1])
-        loss = -torch.log(pi_a) * delta.detach() + F.smooth_l1_loss(v, td_target.detach())
-        loss = loss.mean()
+            # Calculate V
+            v = self.actor_model.v(x[i])  # torch.Size([1, 1, 1])
+            delta = td_target - v
+            pi = self.actor_model.pi(x[i], softmax_dim=2) #  torch.Size([1, 1, 19])
+            print(f"pi shape : {pi.shape}")
+             # a : list contain 10 items : torch.Size([1, ,1])
+            action = a[i]  # action : torch.Size([1, 1])
+            print(f"action shape : {action.shape}")
+            pi = pi.squeeze(0)
+            print(f"pi shape : {pi.shape}")
+            pi_a = pi.gather(1, action)
+            loss = -torch.log(pi_a) * delta.detach() + F.smooth_l1_loss(v, td_target.detach())
+            loss = loss.mean()
+            total_loss += loss
         self.optimizer.zero_grad()
-        loss.backward(retain_graph=True)
+        total_loss.backward(retain_graph=True)
         self.optimizer.step()
 
-        self.hiddens = []
-        return loss.mean().item()
+        return total_loss.item()
 
     def accumulate_gradients(self):
         for actor_net, learner_net in zip(self.actor_model.named_parameters(), self.learner_model.named_parameters()):
@@ -218,14 +219,14 @@ class ActorLearner:
                     action = self.make_19action(self.env, action_index)
                     s_prime, reward, done, _ = self.env.step(action)
                     s_prime = self.converter(self.env_name, s_prime)
-                    self.put_transition((state, action_index, reward, s_prime, done ))
-                    self.put_hidden(hidden)
+                    x_prime, hidden = self.actor_model.forward(s_prime, hidden)
+                    self.put_transition((x, action_index, reward, x_prime, done))
                     state = s_prime
                     self.score += reward
                     T += 1
                     if done:
                         break
-
+                # compute last hidden for new_hiddens l ist
                 loss = self.calcul_loss()
                 self.writer.add_scalar('Loss/train', loss)
                 self.accumulate_gradients()
